@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local configurations & virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Geospatial outputs (large binary files)
+outputs/
+outputs - sentinel 1 (SAR)/
+outputs - sentinel 2 (Optical)/
+outputs*/
+band_cache_mumbai/
+band_cache*/
+*.tif
+*.tiff
+*.aux.xml
+
+# Logs
+logs/
+*.log
+
+# IDE settings
+.vscode/
+.idea/
+.ipynb_checkpoints/

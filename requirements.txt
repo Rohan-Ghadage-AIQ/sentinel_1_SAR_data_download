@@ -1,0 +1,9 @@
+rasterio
+geopandas
+pystac-client
+shapely
+pyproj
+numpy
+xarray
+scikit-image
+scipy

@@ -1,0 +1,15 @@
+Sentinel-2 Metadata
+=======================================================
+Area         : Mumbai Flood AOI
+Date         : 2026-06-02
+Tile         : S2C_43QCA_20260602_0_L2A
+Tile Grid    : 43QCA
+Cloud Cover  : 12.782107%
+CRS          : EPSG:32643 (WGS84 / UTM Zone 43N)
+Pixel Size   : 10.000 m
+Bands (15)  : ['aot', 'blue', 'coastal', 'green', 'nir', 'nir08', 'nir09', 'red', 'rededge1', 'rededge2', 'rededge3', 'scl', 'swir16', 'swir22', 'wvp']
+Shape        : (15, 1989, 3067)  (bands, rows, cols)
+Value Range  : 1.00 - 24493.76
+Mean / Std   : 2832.39 / 2778.20
+File Size    : 372.3 MB
+Output File  : Mumbai_2026-06-02_43QCA_ALL_EPSG32643.tif
