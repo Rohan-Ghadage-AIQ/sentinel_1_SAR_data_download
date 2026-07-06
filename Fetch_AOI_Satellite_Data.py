@@ -80,9 +80,11 @@ def fetch_and_warp_band_direct(item, band_name, dst_transform, dst_width, dst_he
                 AWS_NO_SIGN_REQUEST='YES',
                 GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR',
                 CPL_VSIL_CURL_ALLOWED_EXTENSIONS='.tif,.tiff,.jp2',
-                GDAL_HTTP_TIMEOUT='30',
-                GDAL_HTTP_RETRY_COUNT='3',
-                GDAL_HTTP_RETRY_DELAY='5'
+                GDAL_HTTP_TIMEOUT=30,
+                GDAL_HTTP_RETRY_COUNT=3,
+                GDAL_HTTP_RETRY_DELAY=5,
+                GDAL_CACHEMAX=512,
+                GDAL_HTTP_MERGE_CONSECUTIVE_RANGES='YES'
             ):
                 with rasterio.open(url) as src:
                     src_crs = src.crs
