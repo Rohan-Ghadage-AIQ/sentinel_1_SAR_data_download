@@ -75,6 +75,8 @@ def fetch_and_warp_band_direct(item, band_name, dst_transform, dst_width, dst_he
     import time
     for attempt in range(1, max_retries + 1):
         try:
+            # Append attempt query parameter to bypass GDAL's persistent VSI cache on retries
+            attempt_url = f"{url}&attempt={attempt}" if "?" in url else f"{url}?attempt={attempt}"
             logging.getLogger("SatFetcher").info(f"    Streaming and warping {clean_name}... (Attempt {attempt}/{max_retries})")
             with rasterio.Env(
                 AWS_NO_SIGN_REQUEST='YES',
@@ -84,9 +86,11 @@ def fetch_and_warp_band_direct(item, band_name, dst_transform, dst_width, dst_he
                 GDAL_HTTP_RETRY_COUNT=3,
                 GDAL_HTTP_RETRY_DELAY=5,
                 GDAL_CACHEMAX=512,
-                GDAL_HTTP_MERGE_CONSECUTIVE_RANGES='YES'
+                GDAL_HTTP_MERGE_CONSECUTIVE_RANGES='YES',
+                VSI_CACHE='TRUE',
+                VSI_CACHE_SIZE=104857600
             ):
-                with rasterio.open(url) as src:
+                with rasterio.open(attempt_url) as src:
                     src_crs = src.crs
                     if src_crs is None:
                         # Skip optimization for files with GCPs (like Sentinel-1) and run full canvas warp
@@ -123,38 +127,40 @@ def fetch_and_warp_band_direct(item, band_name, dst_transform, dst_width, dst_he
                             inter_bottom = max(s_bottom, c_bottom)
                             inter_top = min(s_top, c_top)
 
-                            if inter_left < inter_right and inter_bottom < inter_top:
-                                # Window in source coordinate grid
-                                src_window = rasterio.windows.from_bounds(
-                                    inter_left, inter_bottom, inter_right, inter_top, src.transform
-                                )
-                                # Read window from source
-                                sub_dest = src.read(1, window=src_window).astype('float32')
+                            if inter_left >= inter_right or inter_bottom >= inter_top:
+                                return clean_name, None
 
-                                # Row/col in destination canvas
-                                row_start, col_start = rasterio.transform.rowcol(dst_transform, inter_left, inter_top)
-                                row_end, col_end = rasterio.transform.rowcol(dst_transform, inter_right, inter_bottom)
+                            # Window in source coordinate grid
+                            src_window = rasterio.windows.from_bounds(
+                                inter_left, inter_bottom, inter_right, inter_top, src.transform
+                            )
+                            # Read window from source
+                            sub_dest = src.read(1, window=src_window).astype('float32')
 
-                                # Clamp to destination boundaries
-                                row_start = max(0, min(dst_height - 1, row_start))
-                                row_end = max(0, min(dst_height, row_end))
-                                col_start = max(0, min(dst_width - 1, col_start))
-                                col_end = max(0, min(dst_width, col_end))
+                            # Row/col in destination canvas
+                            row_start, col_start = rasterio.transform.rowcol(dst_transform, inter_left, inter_top)
+                            row_end, col_end = rasterio.transform.rowcol(dst_transform, inter_right, inter_bottom)
 
-                                sub_width = col_end - col_start
-                                sub_height = row_end - row_start
+                            # Clamp to destination boundaries
+                            row_start = max(0, min(dst_height - 1, row_start))
+                            row_end = max(0, min(dst_height, row_end))
+                            col_start = max(0, min(dst_width - 1, col_start))
+                            col_end = max(0, min(dst_width, col_end))
 
-                                if sub_width > 0 and sub_height > 0:
-                                    if sub_dest.shape != (sub_height, sub_width):
-                                        import scipy.ndimage
-                                        sub_dest = scipy.ndimage.zoom(
-                                            sub_dest,
-                                            (sub_height / sub_dest.shape[0], sub_width / sub_dest.shape[1]),
-                                            order=1
-                                        )
-                                    band_dest = np.zeros((dst_height, dst_width), dtype='float32')
-                                    band_dest[row_start:row_end, col_start:col_end] = sub_dest
-                                    return clean_name, band_dest
+                            sub_width = col_end - col_start
+                            sub_height = row_end - row_start
+
+                            if sub_width > 0 and sub_height > 0:
+                                if sub_dest.shape != (sub_height, sub_width):
+                                    import scipy.ndimage
+                                    sub_dest = scipy.ndimage.zoom(
+                                        sub_dest,
+                                        (sub_height / sub_dest.shape[0], sub_width / sub_dest.shape[1]),
+                                        order=1
+                                    )
+                                band_dest = np.zeros((dst_height, dst_width), dtype='float32')
+                                band_dest[row_start:row_end, col_start:col_end] = sub_dest
+                                return clean_name, band_dest
                     except Exception as e_direct:
                         logging.getLogger("SatFetcher").debug(f"Direct window read skipped: {e_direct}")
 
