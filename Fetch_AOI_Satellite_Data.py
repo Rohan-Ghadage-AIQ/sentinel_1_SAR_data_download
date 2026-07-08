@@ -93,20 +93,70 @@ def fetch_and_warp_band_direct(item, band_name, dst_transform, dst_width, dst_he
                 with rasterio.open(attempt_url) as src:
                     src_crs = src.crs
                     if src_crs is None:
-                        # Skip optimization for files with GCPs (like Sentinel-1) and run full canvas warp
-                        band_dest = np.zeros((dst_height, dst_width), dtype='float32')
-                        reproject(
-                            source=rasterio.band(src, 1),
-                            destination=band_dest,
-                            src_transform=src.transform,
-                            src_crs=None,
-                            dst_transform=dst_transform,
-                            dst_crs=dst_crs,
-                            resampling=Resampling.bilinear,
-                            src_nodata=0,
-                            dst_nodata=0
-                        )
-                        return clean_name, band_dest
+                        # This is a file with GCPs (like Sentinel-1).
+                        # Determine overview factor based on target resolution to speed up downloads
+                        pixel_size = dst_transform[0]
+                        overview_factor = 1
+                        
+                        try:
+                            ov_list = src.overviews(1)
+                        except Exception:
+                            ov_list = []
+                            
+                        if pixel_size >= 80.0 and 8 in ov_list:
+                            overview_factor = 8
+                        elif pixel_size >= 40.0 and 4 in ov_list:
+                            overview_factor = 4
+                        elif pixel_size >= 20.0 and 2 in ov_list:
+                            overview_factor = 2
+                            
+                        if overview_factor > 1:
+                            out_shape = (src.height // overview_factor, src.width // overview_factor)
+                            logging.getLogger("SatFetcher").info(f"    Reading S1 from {overview_factor}x overview level...")
+                            data = src.read(1, out_shape=out_shape).astype('float32')
+                            
+                            # Scale the GCP row/col coordinates
+                            from rasterio.control import GroundControlPoint
+                            scaled_gcps = []
+                            for gcp in src.gcps[0]:
+                                scaled_gcps.append(GroundControlPoint(
+                                    row = gcp.row / overview_factor,
+                                    col = gcp.col / overview_factor,
+                                    x = gcp.x,
+                                    y = gcp.y,
+                                    z = gcp.z,
+                                    id = gcp.id,
+                                    info = gcp.info
+                                ))
+                            
+                            band_dest = np.zeros((dst_height, dst_width), dtype='float32')
+                            reproject(
+                                source=data,
+                                destination=band_dest,
+                                gcps=scaled_gcps,
+                                src_crs=src.gcps[1] or 'epsg:4326',
+                                dst_transform=dst_transform,
+                                dst_crs=dst_crs,
+                                resampling=Resampling.bilinear,
+                                src_nodata=0,
+                                dst_nodata=0
+                            )
+                            return clean_name, band_dest
+                        else:
+                            # Fallback to standard full canvas warp (at full resolution)
+                            band_dest = np.zeros((dst_height, dst_width), dtype='float32')
+                            reproject(
+                                source=rasterio.band(src, 1),
+                                destination=band_dest,
+                                src_transform=src.transform,
+                                src_crs=None,
+                                dst_transform=dst_transform,
+                                dst_crs=dst_crs,
+                                resampling=Resampling.bilinear,
+                                src_nodata=0,
+                                dst_nodata=0
+                            )
+                            return clean_name, band_dest
 
                     # Try direct window read if CRS and resolution match (saves reproject overhead)
                     try:
