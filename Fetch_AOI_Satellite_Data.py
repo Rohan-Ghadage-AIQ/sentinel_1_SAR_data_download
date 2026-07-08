@@ -305,8 +305,6 @@ def run_fetch_pipeline(shp_path, output_dir, platform, start_date, end_date, pix
     logger.info(f"Target Dimensions: {dst_width} cols x {dst_height} rows")
     logger.info(f"Target Resolution: {pixel_size} meters")
 
-    canvas = np.zeros((len(bands), dst_height, dst_width), dtype='float32')
-
     # ── 4. STAC Query ────────────────────────────────────────────────────────
     logger.info("Connecting to Earth Search STAC API...")
     catalog = Client.open("https://earth-search.aws.element84.com/v1")
@@ -322,124 +320,158 @@ def run_fetch_pipeline(shp_path, output_dir, platform, start_date, end_date, pix
     items = list(search.get_all_items())
     logger.info(f"Total overlapping scenes found: {len(items)}")
 
-    # Filter strictly to the polygon boundary shape and select the minimum set of tiles using a greedy coverage algorithm
-    items_with_geom = []
-    for item in items:
-        item_geom = shape(item.geometry)
-        if item_geom.intersects(aoi_wgs84):
-            inter_area = item_geom.intersection(aoi_wgs84).area
-            items_with_geom.append((item, item_geom, inter_area))
-
-    # Sort by overlap area descending
-    items_with_geom.sort(key=lambda x: x[2], reverse=True)
-
-    selected_items = []
-    uncovered_aoi = aoi_wgs84
-    original_area = aoi_wgs84.area
-
-    for item, geom, _ in items_with_geom:
-        if uncovered_aoi.is_empty:
-            break
-        # Calculate new area covered by this tile
-        covered_new = uncovered_aoi.intersection(geom).area
-        # If it covers more than 0.5% of the AOI, select it
-        if covered_new > (original_area * 0.005):
-            selected_items.append(item)
-            uncovered_aoi = uncovered_aoi.difference(geom)
-
-    overlapping_items = selected_items
-    logger.info(f"Geometry-intersecting scenes: {len(items_with_geom)}")
-    logger.info(f"Selected {len(overlapping_items)} scenes to cover the AOI (skipped redundant tiles).")
-
-    if not overlapping_items:
+    if not items:
         logger.warning("No scenes found matching the spatial AOI geometry.")
         return
 
-    # ── 5. Warp and Stitch overlapping scenes ───────────────────────────────
-    logger.info("\nStreaming satellite data to canvas...")
-    for idx, item in enumerate(overlapping_items, 1):
-        scene_id = item.id
+    # Group items by date (day)
+    from collections import defaultdict
+    items_by_date = defaultdict(list)
+    for item in items:
+        dt = item.datetime
+        if dt is None:
+            dt_str = item.properties.get('datetime', '')
+            if dt_str:
+                dt = datetime.datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+        if dt:
+            items_by_date[dt.date()].append(item)
+
+    logger.info(f"Grouped scenes into {len(items_by_date)} unique dates.")
+
+    # ── 5. Process each date ──────────────────────────────────────────────────
+    for date_key in sorted(items_by_date.keys()):
+        date_str = date_key.isoformat()
+        logger.info(f"\n{'=' * 60}\nPROCESSING DATE: {date_str}\n{'=' * 60}")
         
-        if platform.lower() == 'sentinel-2':
-            cloud = item.properties.get('eo:cloud_cover', 100)
-            logger.info(f"[{idx}/{len(overlapping_items)}] Stitching {scene_id} | Cloud: {cloud:.1f}%")
-        else:
-            logger.info(f"[{idx}/{len(overlapping_items)}] Stitching {scene_id}")
-
-        # Fetch and reproject bands sequentially to avoid GDAL's multi-threading PROJ database issue on Windows
-        tile_bands = {}
-        for b in bands:
-            b_name, band_data = fetch_and_warp_band_direct(item, b, dst_transform, dst_width, dst_height, f"epsg:{target_epsg}")
-            if band_data is not None:
-                tile_bands[b_name] = band_data
-
-        if not tile_bands:
+        date_items = items_by_date[date_key]
+        
+        # Filter strictly to the polygon boundary shape and select the minimum set of tiles using a greedy coverage algorithm
+        items_with_geom = []
+        for item in date_items:
+            item_geom = shape(item.geometry)
+            if item_geom.intersects(aoi_wgs84):
+                inter_area = item_geom.intersection(aoi_wgs84).area
+                items_with_geom.append((item, item_geom, inter_area))
+        
+        if not items_with_geom:
+            logger.info(f"No geometry-intersecting scenes found for {date_str}. Skipping.")
             continue
 
-        # Generate valid data mask (pixels != 0 in any loaded band)
-        ref_band = next(iter(tile_bands.values()))
-        valid_mask = (ref_band != 0)
+        # Sort by overlap area descending
+        items_with_geom.sort(key=lambda x: x[2], reverse=True)
 
-        # Draw to master canvas
-        for b_idx, b_name in enumerate(bands):
-            if b_name in tile_bands:
-                canvas[b_idx][valid_mask] = tile_bands[b_name][valid_mask]
+        selected_items = []
+        uncovered_aoi = aoi_wgs84
+        original_area = aoi_wgs84.area
 
-    # ── 6. Clip canvas precisely to shapefile geometry ────────────────────────
-    logger.info("\nMasking out areas outside the shapefile polygon...")
-    aoi_mask = geometry_mask(
-        [aoi_utm],
-        out_shape=(dst_height, dst_width),
-        transform=dst_transform,
-        invert=True
-    )
+        for item, geom, _ in items_with_geom:
+            if uncovered_aoi.is_empty:
+                break
+            # Calculate new area covered by this tile
+            covered_new = uncovered_aoi.intersection(geom).area
+            # If it covers more than 0.5% of the AOI, select it
+            if covered_new > (original_area * 0.005):
+                selected_items.append(item)
+                uncovered_aoi = uncovered_aoi.difference(geom)
 
-    for idx in range(len(bands)):
-        canvas[idx][~aoi_mask] = 0
+        logger.info(f"Selected {len(selected_items)} scenes to cover the AOI on {date_str} (out of {len(date_items)} geometry-intersecting).")
 
-    # ── 7. Save output GeoTIFF ───────────────────────────────────────────────
-    shp_basename = Path(shp_path).stem
-    output_filename = platform_dir / f"{shp_basename}_{out_suffix}_EPSG{target_epsg}.tif"
-    logger.info(f"Writing master GeoTIFF to: {output_filename}")
+        if not selected_items:
+            logger.warning(f"No scenes selected to cover the AOI on {date_str}. Skipping.")
+            continue
 
-    out_profile = {
-        'driver': 'GTiff',
-        'height': dst_height, 'width': dst_width,
-        'count': len(bands), 'dtype': 'float32',
-        'crs': dst_crs, 'transform': dst_transform,
-        'compress': 'lzw', 'tiled': True,
-        'blockxsize': 256, 'blockysize': 256,
-        'predictor': 2, 'bigtiff': 'IF_SAFER', 'nodata': 0,
-    }
+        # Initialize canvas for this date
+        canvas = np.zeros((len(bands), dst_height, dst_width), dtype='float32')
 
-    with Env():
-        with rasterio.open(output_filename, 'w', **out_profile) as dst:
-            for idx in range(len(bands)):
-                dst.write(canvas[idx], idx + 1)
-            for idx, name in enumerate(bands, 1):
-                dst.set_band_description(idx, name)
+        logger.info(f"Streaming satellite data for {date_str} to canvas...")
+        for idx, item in enumerate(selected_items, 1):
+            scene_id = item.id
+            if platform.lower() == 'sentinel-2':
+                cloud = item.properties.get('eo:cloud_cover', 100)
+                logger.info(f"[{idx}/{len(selected_items)}] Stitching {scene_id} | Cloud: {cloud:.1f}%")
+            else:
+                logger.info(f"[{idx}/{len(selected_items)}] Stitching {scene_id}")
 
-    size_mb = output_filename.stat().st_size / (1024 * 1024)
-    logger.info(f"Saved master file: {output_filename.name} ({size_mb:.1f} MB)")
+            # Fetch and reproject bands sequentially to avoid GDAL's multi-threading PROJ database issue on Windows
+            tile_bands = {}
+            for b in bands:
+                b_name, band_data = fetch_and_warp_band_direct(item, b, dst_transform, dst_width, dst_height, f"epsg:{target_epsg}")
+                if band_data is not None:
+                    tile_bands[b_name] = band_data
 
-    # ── 8. Save Metadata ─────────────────────────────────────────────────────
-    mf = platform_dir / f"{shp_basename}_{out_suffix}_metadata.txt"
-    finite = canvas[canvas != 0]
-    with open(mf, 'w') as f:
-        f.write(f"Satellite Data Fetch Metadata\n{'=' * 55}\n")
-        f.write(f"Platform     : {platform}\n")
-        f.write(f"Area / SHP   : {shp_basename} (Stitched & Polygon Clipped)\n")
-        f.write(f"Date Range   : {start_date} to {end_date}\n")
-        f.write(f"CRS          : EPSG:{target_epsg} (Auto-detected UTM)\n")
-        f.write(f"Resolution   : {pixel_size:.1f} m\n")
-        f.write(f"Bands ({len(bands):02d})  : {bands}\n")
-        f.write(f"Shape        : {canvas.shape}  (bands, rows, cols)\n")
-        if finite.size > 0:
-            f.write(f"Value Range  : {finite.min():.2f} - {finite.max():.2f}\n")
-            f.write(f"Mean / Std   : {finite.mean():.2f} / {finite.std():.2f}\n")
-        f.write(f"File Size    : {size_mb:.1f} MB\n")
-        f.write(f"Output File  : {output_filename.name}\n")
-    logger.info(f"Metadata saved: {mf.name}")
+            if not tile_bands:
+                continue
+
+            # Generate valid data mask (pixels != 0 in any loaded band)
+            ref_band = next(iter(tile_bands.values()))
+            valid_mask = (ref_band != 0)
+
+            # Draw to canvas
+            for b_idx, b_name in enumerate(bands):
+                if b_name in tile_bands:
+                    canvas[b_idx][valid_mask] = tile_bands[b_name][valid_mask]
+
+        # Check if the canvas contains any valid data
+        if np.count_nonzero(canvas) == 0:
+            logger.warning(f"No valid pixels were downloaded for {date_str}. Skipping file generation.")
+            continue
+
+        # Clip canvas precisely to shapefile geometry
+        logger.info("Masking out areas outside the shapefile polygon...")
+        aoi_mask = geometry_mask(
+            [aoi_utm],
+            out_shape=(dst_height, dst_width),
+            transform=dst_transform,
+            invert=True
+        )
+
+        for idx in range(len(bands)):
+            canvas[idx][~aoi_mask] = 0
+
+        # Save output GeoTIFF for this date
+        shp_basename = Path(shp_path).stem
+        output_filename = platform_dir / f"{shp_basename}_{out_suffix}_{date_str}_EPSG{target_epsg}.tif"
+        logger.info(f"Writing master GeoTIFF to: {output_filename}")
+
+        out_profile = {
+            'driver': 'GTiff',
+            'height': dst_height, 'width': dst_width,
+            'count': len(bands), 'dtype': 'float32',
+            'crs': dst_crs, 'transform': dst_transform,
+            'compress': 'lzw', 'tiled': True,
+            'blockxsize': 256, 'blockysize': 256,
+            'predictor': 2, 'bigtiff': 'IF_SAFER', 'nodata': 0,
+        }
+
+        with Env():
+            with rasterio.open(output_filename, 'w', **out_profile) as dst:
+                for idx in range(len(bands)):
+                    dst.write(canvas[idx], idx + 1)
+                for idx, name in enumerate(bands, 1):
+                    dst.set_band_description(idx, name)
+
+        size_mb = output_filename.stat().st_size / (1024 * 1024)
+        logger.info(f"Saved master file: {output_filename.name} ({size_mb:.1f} MB)")
+
+        # Save Metadata
+        mf = platform_dir / f"{shp_basename}_{out_suffix}_{date_str}_metadata.txt"
+        finite = canvas[canvas != 0]
+        with open(mf, 'w') as f:
+            f.write(f"Satellite Data Fetch Metadata\n{'=' * 55}\n")
+            f.write(f"Platform     : {platform}\n")
+            f.write(f"Area / SHP   : {shp_basename} (Stitched & Polygon Clipped)\n")
+            f.write(f"Date         : {date_str}\n")
+            f.write(f"CRS          : EPSG:{target_epsg} (Auto-detected UTM)\n")
+            f.write(f"Resolution   : {pixel_size:.1f} m\n")
+            f.write(f"Bands ({len(bands):02d})  : {bands}\n")
+            f.write(f"Shape        : {canvas.shape}  (bands, rows, cols)\n")
+            if finite.size > 0:
+                f.write(f"Value Range  : {finite.min():.2f} - {finite.max():.2f}\n")
+                f.write(f"Mean / Std   : {finite.mean():.2f} / {finite.std():.2f}\n")
+            f.write(f"File Size    : {size_mb:.1f} MB\n")
+            f.write(f"Output File  : {output_filename.name}\n")
+        logger.info(f"Metadata saved: {mf.name}")
+
     logger.info(f"--- FETCH PROCESS FOR {platform.upper()} COMPLETE ---")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -454,6 +486,8 @@ if __name__ == "__main__":
                         help="Choose sentinel-1 (SAR) or sentinel-2 (optical)")
     parser.add_argument("--start", type=str, default="2025-05-01", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, default="2025-05-01", help="End date (YYYY-MM-DD)")
+    parser.add_argument("--resolution", type=float, default=None,
+                        help="Target pixel resolution in meters (e.g. 10, 20, 40). Defaults: 10m for Sentinel-2, 20m for Sentinel-1.")
     
     args = parser.parse_args()
 
@@ -476,10 +510,16 @@ if __name__ == "__main__":
         logger.error(f"Invalid date format! Use YYYY-MM-DD: {e}")
         sys.exit(1)
 
+    # Set default resolution based on platform
+    pixel_size = args.resolution
+    if pixel_size is None:
+        pixel_size = 10.0 if args.platform == 'sentinel-2' else 20.0
+
     run_fetch_pipeline(
         shp_path=args.shp,
         output_dir=args.output,
         platform=args.platform,
         start_date=start_date,
-        end_date=end_date
+        end_date=end_date,
+        pixel_size=pixel_size
     )
