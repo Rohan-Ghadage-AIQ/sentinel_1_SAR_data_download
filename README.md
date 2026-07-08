@@ -70,30 +70,53 @@ pip install -r requirements.txt
 
 ## 🚀 How to Run the Pipeline
 
-The script `Fetch_AOI_Satellite_Data.py` is dynamic. It automatically loads your shapefile, computes its geographic centroid, determines the correct UTM zone projection (e.g. `EPSG:32643` for Mumbai), queries the STAC API, merges all overlapping passes, and clips the mosaic exactly to the shapefile polygon boundaries.
+The script `Fetch_AOI_Satellite_Data.py` is dynamic. It automatically loads your shapefile, computes its geographic centroid, determines the correct UTM zone projection (e.g. `EPSG:32643` for Mumbai), queries the STAC API, and clips the outputs exactly to your shapefile boundaries.
 
-### 1. Sentinel-1 (SAR Radar Imagery)
-Downloads polarizations **VV and VH** (ideal for flood extent mapping, water body classification, and structural analysis).
-```powershell
-python Fetch_AOI_Satellite_Data.py --shp "Mumbai_Flood_AOI/Mumbai_Flood_AOI.shp" --platform sentinel-1 --start 2025-05-07 --end 2025-05-07
-```
-* **Output Location**: `outputs/Sentinel-1 (SAR)/Mumbai_Flood_AOI_S1_SAR_EPSG32643.tif`
-* **Size**: ~293 MB (depending on AOI shape).
-* **Download Duration**: **~7 to 10 minutes** (benchmarked on a standard ~300 KB/s home internet connection).
+### 📅 Time-Series Support (Date Grouping)
+* **Single Date**: If you run the script for a single day (e.g. `--start 2025-05-01 --end 2025-05-01`), it will save exactly one file for that date.
+* **Date Ranges**: If you run the script for a multi-day range (e.g. `--start 2026-06-01 --end 2026-06-30`), the script automatically groups the scenes by date and outputs **a separate, clean GeoTIFF for every date the satellite passes over your area**. This allows you to easily view a historical time-series in QGIS.
 
-### 2. Sentinel-2 (Optical Imagery)
-Downloads 6 spectral bands: **Blue, Green, Red, NIR, SWIR1, and SWIR2** at 10m resolution (ideal for vegetation, true-color maps, and land cover classification).
-```powershell
-python Fetch_AOI_Satellite_Data.py --shp "Mumbai_Flood_AOI/Mumbai_Flood_AOI.shp" --platform sentinel-2 --start 2025-05-01 --end 2025-05-01
-```
-* **Output Location**: `outputs/Sentinel-2 (Optical)/Mumbai_Flood_AOI_S2_Optical_EPSG32643.tif`
-* **Size**: ~1.5 GB (fully populated 6-band float32 data).
-* **Download Duration**: **~50 to 60 minutes** (benchmarked on a standard ~300 KB/s home internet connection; Tile 1 takes ~39 mins, Tile 2 takes ~19 mins, and Tile 3 is bypassed instantly in 0s).
+### ⚙️ The `--resolution` Parameter (Controlling Speed & Data Usage)
+You can specify the pixel spacing in meters (e.g., `10`, `20`, `40`, `80`) using the `--resolution` flag. 
 
-### 3. Dynamic Shapefile Input (India & Global Level)
+* **Sentinel-1 (SAR)**: Raw files are untiled (striped), meaning GDAL must download nearly the entire 600 MB file at full resolution. **Sentinel-1's native physical resolution is 20m** (10m is just upsampled by the space agency). Setting resolution to 40m or 80m uses pre-built overview pyramids in memory, reducing download data by **16x to 64x** and saving hours of download time.
+* **Sentinel-2 (Optical)**: Files are tiled COGs, allowing GDAL to only fetch the exact bounding crop box. While 10m is fast, running at 20m or 40m resolution makes downloads take **under 1–2 minutes** even on slow connections.
+
+#### 📊 Download Benchmarks per Orbit Pass (at ~300 KB/s Standard Connection)
+
+| Satellite Platform | 80m Resolution | 40m Resolution | 20m Resolution (Native S1) | 10m Resolution (Native S2) |
+|---|---|---|---|---|
+| **Sentinel-1 (SAR)** | **~1 minute** (~9 MB data) | **~3 minutes** (~37 MB data) | **~12 minutes** (~150 MB data) | ⚠️ **~2 hours** (~1.2 GB data) |
+| **Sentinel-2 (Optical)** | **~30 seconds** (~5 MB data) | **~1.5 minutes** (~25 MB data) | **~5 minutes** (~100 MB data) | **~12 minutes** (~150 MB data) |
+
+---
+
+### 💻 Execution Examples
+
+#### 1. Sentinel-1 (SAR Radar)
+* **High Detail (Native 20m)**:
+  ```powershell
+  python Fetch_AOI_Satellite_Data.py --shp "Mumbai_Flood_AOI/Mumbai_Flood_AOI.shp" --platform sentinel-1 --start 2026-06-01 --end 2026-06-30 --resolution 20
+  ```
+* **Fast Time-Series (40m / 80m - Recommended on slow connections)**:
+  ```powershell
+  python Fetch_AOI_Satellite_Data.py --shp "Mumbai_Flood_AOI/Mumbai_Flood_AOI.shp" --platform sentinel-1 --start 2026-06-01 --end 2026-06-30 --resolution 80
+  ```
+
+#### 2. Sentinel-2 (Optical Imagery)
+* **Full Detail (Native 10m)**:
+  ```powershell
+  python Fetch_AOI_Satellite_Data.py --shp "Mumbai_Flood_AOI/Mumbai_Flood_AOI.shp" --platform sentinel-2 --start 2025-05-01 --end 2025-05-01 --resolution 10
+  ```
+* **Fast Preview (20m / 40m)**:
+  ```powershell
+  python Fetch_AOI_Satellite_Data.py --shp "Mumbai_Flood_AOI/Mumbai_Flood_AOI.shp" --platform sentinel-2 --start 2025-05-01 --end 2025-05-01 --resolution 20
+  ```
+
+#### 3. Dynamic Shapefile Input (India & Global Level)
 To process any other shapefile (e.g. a different state or region in India):
 ```powershell
-python Fetch_AOI_Satellite_Data.py --shp "path/to/your/new_area.shp" --platform sentinel-1 --start YYYY-MM-DD --end YYYY-MM-DD
+python Fetch_AOI_Satellite_Data.py --shp "path/to/your/new_area.shp" --platform sentinel-1 --start YYYY-MM-DD --end YYYY-MM-DD --resolution 40
 ```
 *Note: The script dynamically handles coordinate transformations for any geographic location globally, auto-detecting the appropriate local UTM projection.*
 
