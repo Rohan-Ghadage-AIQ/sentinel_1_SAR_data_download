@@ -273,10 +273,8 @@ def main():
     for idx, product in enumerate(results, 1):
         meta = product.properties
         filename = meta.get("fileName", product.properties.get("fileID", "Unknown") + ".zip")
-        url = meta.get("url", "")
-        url_filename = os.path.basename(url.split("?")[0]) if url else filename
         
-        file_path = os.path.join(args.out_dir, url_filename)
+        file_path = os.path.join(args.out_dir, filename)
         expected_bytes = int(meta.get("bytes", 0))
         
         # Check if file already exists and is complete
@@ -284,10 +282,10 @@ def main():
             existing_bytes = os.path.getsize(file_path)
             # Allow minor size differences (e.g. metadata or file system block alignment differences)
             if abs(existing_bytes - expected_bytes) < 1024 * 1024 or existing_bytes > 0.95 * expected_bytes:
-                logger.info(f"[{idx}/{total_found}] File already exists and is complete: {url_filename}. Skipping.")
+                logger.info(f"[{idx}/{total_found}] File already exists and is complete: {filename}. Skipping.")
                 continue
                 
-        logger.info(f"[{idx}/{total_found}] Downloading {url_filename} ({expected_bytes / (1024*1024):.1f} MB)...")
+        logger.info(f"[{idx}/{total_found}] Downloading {filename} ({expected_bytes / (1024*1024):.1f} MB)...")
         
         attempt = 1
         max_retries = 3
@@ -298,15 +296,15 @@ def main():
                 success = True
                 break
             except Exception as e:
-                logger.warning(f"  [Attempt {attempt}/{max_retries}] Error downloading {url_filename}: {e}")
+                logger.warning(f"  [Attempt {attempt}/{max_retries}] Error downloading {filename}: {e}")
                 attempt += 1
                 if attempt <= max_retries:
                     import time
                     time.sleep(5)
                 
         if not success:
-            logger.error(f"  Failed to download {url_filename} after {max_retries} attempts.")
-            failed_products.append(url_filename)
+            logger.error(f"  Failed to download {filename} after {max_retries} attempts.")
+            failed_products.append(filename)
             
     if failed_products:
         logger.error(f"Download finished with {len(failed_products)} failures:")
@@ -323,11 +321,11 @@ def main():
             for product in results:
                 meta = product.properties
                 filename = meta.get("fileName", product.properties.get("fileID", ""))
-                url = meta.get("url", "")
-                url_filename = os.path.basename(url.split("?")[0]) if url else filename
+                if not filename:
+                    continue
                 
                 # Match 8 digits date prefix in standard filenames: S1_..._20260607T...
-                match = re.search(r'_(\d{8})T', url_filename)
+                match = re.search(r'_(\d{8})T', filename)
                 if match:
                     d = match.group(1)
                     formatted_date = f"{d[:4]}-{d[4:6]}-{d[6:]}"

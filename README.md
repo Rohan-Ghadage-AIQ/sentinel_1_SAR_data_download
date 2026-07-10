@@ -15,7 +15,12 @@ SAR Data/
 │   ├── Mumbai_Flood_AOI.shx           # Shapefile index
 │   ├── Mumbai_Flood_AOI.dbf           # Attribute table
 │   └── Mumbai_Flood_AOI.prj           # Coordinate system details
-├── Fetch_AOI_Satellite_Data.py        # Universal pipeline script (Sentinel-1 & Sentinel-2)
+├── SLC/
+│   ├── download_SLC_image.py          # Sentinel-1 SLC downloader and stitcher
+│   ├── README.md                      # Guide for Sentinel-1 SLC
+│   └── Architecture.md                # Architecture for Sentinel-1 SLC
+├── Fetch_AOI_Satellite_Data.py        # Universal pipeline script (Sentinel-1 & Sentinel-2 GRD)
+├── Download_Mumbai_Sentinel2.py       # Unified Sentinel-2 downloader & stitcher
 ├── ARCHITECTURE.md                    # Technical details of optimizations
 ├── README.md                          # Set up & execution guide (this file)
 ├── requirements.txt                   # List of Python dependencies
@@ -93,32 +98,53 @@ You can specify the pixel spacing in meters (e.g., `10`, `20`, `40`, `80`) using
 
 ### 💻 Execution Examples
 
-#### 1. Sentinel-1 (SAR Radar)
-* **High Detail (Native 20m)**:
+This repository contains three main entry-point scripts designed for different platforms and geospatial needs:
+
+---
+
+#### 1. Sentinel-1 (SAR Radar - Low-Level SLC Burst Stitcher)
+If you need raw **Single-Look Complex (SLC)** amplitude data (e.g. for ground deformation or precise double-bounce urban backscatter analysis):
+* **Single Command (Stitch & Crop)**:
   ```powershell
-  python Fetch_AOI_Satellite_Data.py --shp "Mumbai_Flood_AOI/Mumbai_Flood_AOI.shp" --platform sentinel-1 --start 2026-06-01 --end 2026-06-30 --resolution 20
+  python SLC/download_SLC_image.py --shp "Mumbai_Flood_AOI/Mumbai_Flood_AOI.shp" --start 2026-06-01 --end 2026-06-30 --bursts --username "your_username" --password "your_password" --stitch
   ```
-* **Fast Time-Series (40m / 80m - Recommended on slow connections)**:
+  *Note: Sub-swath burst downloading saves 60% bandwidth compared to full scene downloads. Mosaics are stored in `outputs/Sentinel-1 (SLC)/intensity/`.*
+
+---
+
+#### 2. Sentinel-2 (Optical - Unified S3-Direct Daily Mosaic Downloader)
+If you need **Sentinel-2 optical data** (e.g. for true-color RGB maps or vegetation health analysis), this script warps tiles **directly from AWS S3 in parallel to memory**, requiring zero local disk space for raw files:
+* **Run for the entire month (with Cloud Filter)**:
   ```powershell
-  python Fetch_AOI_Satellite_Data.py --shp "Mumbai_Flood_AOI/Mumbai_Flood_AOI.shp" --platform sentinel-1 --start 2026-06-01 --end 2026-06-30 --resolution 80
+  python Download_Mumbai_Sentinel2.py --start 2026-06-01 --end 2026-06-30 --cloud-max 30 --out-dir "outputs/Sentinel-2-June2026"
+  ```
+* **Run for a single day**:
+  ```powershell
+  python Download_Mumbai_Sentinel2.py --start 2026-06-02 --end 2026-06-02 --out-dir "outputs/Sentinel-2-June2026"
+  ```
+  *Note: Mosaics are saved directly as unified, cropped, 6-band daily GeoTIFFs inside the specified `--out-dir`.*
+
+---
+
+#### 3. General AOI Satellite Data Fetcher (Fast Window-Clipped GRD/L2A)
+If you want to quickly download a region using standard remote sub-window clipping (GRD for Sentinel-1, L2A for Sentinel-2):
+* **Sentinel-1 GRD (40m resolution)**:
+  ```powershell
+  python Fetch_AOI_Satellite_Data.py --shp "Mumbai_Flood_AOI/Mumbai_Flood_AOI.shp" --platform sentinel-1 --start 2026-06-01 --end 2026-06-30 --resolution 40
+  ```
+* **Sentinel-2 Optical (20m resolution)**:
+  ```powershell
+  python Fetch_AOI_Satellite_Data.py --shp "Mumbai_Flood_AOI/Mumbai_Flood_AOI.shp" --platform sentinel-2 --start 2026-06-01 --end 2026-06-30 --resolution 20
   ```
 
-#### 2. Sentinel-2 (Optical Imagery)
-* **Full Detail (Native 10m)**:
-  ```powershell
-  python Fetch_AOI_Satellite_Data.py --shp "Mumbai_Flood_AOI/Mumbai_Flood_AOI.shp" --platform sentinel-2 --start 2025-05-01 --end 2025-05-01 --resolution 10
-  ```
-* **Fast Preview (20m / 40m)**:
-  ```powershell
-  python Fetch_AOI_Satellite_Data.py --shp "Mumbai_Flood_AOI/Mumbai_Flood_AOI.shp" --platform sentinel-2 --start 2025-05-01 --end 2025-05-01 --resolution 20
-  ```
+---
 
-#### 3. Dynamic Shapefile Input (India & Global Level)
-To process any other shapefile (e.g. a different state or region in India):
+#### 4. Dynamic Shapefile Input (India & Global Level)
+To process any other shapefile (e.g. a different state or region globally), just point to your custom shapefile:
 ```powershell
 python Fetch_AOI_Satellite_Data.py --shp "path/to/your/new_area.shp" --platform sentinel-1 --start YYYY-MM-DD --end YYYY-MM-DD --resolution 40
 ```
-*Note: The script dynamically handles coordinate transformations for any geographic location globally, auto-detecting the appropriate local UTM projection.*
+*Note: The pipeline dynamically computes the UTM coordinate transformations and target projection zones automatically.*
 
 ---
 

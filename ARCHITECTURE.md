@@ -76,18 +76,40 @@ graph TD
 
 ## 📂 Code Module Architecture
 
-The execution logic is structured cleanly within `Fetch_AOI_Satellite_Data.py`:
+This system consists of three specialized geospatial pipelines:
 
+### 1. `Download_Mumbai_Sentinel2.py` (Sentinel-2 Unified Downloader & Stitcher)
+* **`warp_band_to_grid(...)`**:
+  * Resolves Sentinel-2 S3 band paths and sets `AWS_NO_SIGN_REQUEST=YES`.
+  * Streams pixels on-the-fly from AWS using `reproject` (bilinear resampling) directly mapping coordinates into the destination UTM zone (`EPSG:32643`) at 10m resolution.
+  * Implements fallback checks to request `-jp2` formats if raw direct formats are missing.
+* **`main()`**:
+  * Parses arguments for dates, shapefiles, and output paths.
+  * Loads the AOI shapefile and projects it to WGS84 for STAC querying.
+  * Queries STAC for Sentinel-2, groups results by acquisition **date**, and filters them using the user-defined `--cloud-max` threshold.
+  * For each unique date:
+    1. Sorts tiles by cloud cover descending (so cleaner pixels overwrite cloudy ones).
+    2. Blends active bands onto a shared target canvas.
+    3. Rasterizes the AOI boundary to generate a mask and sets outside pixels to `0` (nodata).
+    4. Writes out a single, tiled, LZW-compressed 6-band daily mosaic GeoTIFF.
+
+### 2. `SLC/download_SLC_image.py` (Sentinel-1 SLC Downloader & Burst Stitcher)
+* **`stitch_slc_bursts(...)`**:
+  * Loads shapefile boundary and queries/filters local downloaded burst TIFF files.
+  * Stitches VV and VH polarizations separately:
+    1. Reads complex data: $S = \text{Real} + i \cdot \text{Imaginary}$ and calculates amplitude $\sqrt{\text{Real}^2 + \text{Imag}.^2}$.
+    2. Maps GCPs (Ground Control Points) embedded in raw bursts to warp the swath into the target UTM projection at 10m resolution.
+    3. Averages overlapping pixels to eliminate boundary seams.
+    4. Clips precisely to the shapefile boundaries.
+* **`main()`**:
+  * Performs parallel search and sequential secure downloads from NASA/ASF DAAC using Earthdata credentials.
+  * Automatically checks and skips complete files using the product's unique `fileName` metadata, bypassing redundant downloads.
+  * Parses unique acquisition dates from downloaded products and triggers the stitching engine sequentially.
+
+### 3. `Fetch_AOI_Satellite_Data.py` (Universal Window-Clipped GRD/L2A Fetcher)
 * **`fetch_and_warp_band_direct(...)`**:
-  * Resolves S3/HTTPS links, handles credentials-free access (`AWS_NO_SIGN_REQUEST`).
-  * Establishes the `rasterio.Env` environment.
-  * Checks for direct window read (if CRS and resolutions match).
-  * Executes sub-window `reproject` (if CRS differs) or GCP-based full warp (for Sentinel-1).
-  * Implements retry-backoff error handling.
+  * Direct window read (bypassing reproject) if source CRS and resolutions match.
+  * Sub-window reproject constraints to prevent GDAL out-of-bounds HTTP requests.
 * **`run_fetch_pipeline(...)`**:
-  * Loads the shapefile, calculates the centroid, and computes target UTM zone WKT.
-  * Queries the STAC API for the date range and spatial bbox.
-  * Implements the **Greedy Coverage Solver** to select the minimal set of items.
-  * Loops over selected items, calls `fetch_and_warp_band_direct` sequentially for each band, and paints them onto the mosaic canvas.
-  * Generates a spatial polygon mask using `rasterio.features.geometry_mask` and sets pixels outside the shapefile boundary to `0` (NoData).
-  * Saves the final GeoTIFF and writes a metadata TXT file containing bands description and footprint coordinate bounds.
+  * Implements the **Greedy Coverage Solver** to select the minimal set of tiles covering the shapefile.
+  * Renders a single stitched, masked multi-band GeoTIFF on disk.
