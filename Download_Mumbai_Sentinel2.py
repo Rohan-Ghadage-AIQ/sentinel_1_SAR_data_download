@@ -23,15 +23,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 warnings.filterwarnings('ignore')
 
 # ── Fix PROJ / GDAL environment ───────────────────────────────────────────────
-import pyproj
-PROJ_DIR = pyproj.datadir.get_data_dir()
-os.environ['PROJ_LIB']            = PROJ_DIR
-os.environ['GDAL_DATA']           = PROJ_DIR
 os.environ['PROJ_NETWORK']        = 'OFF'
 os.environ['PROJ_DEBUG']          = '0'
 os.environ['AWS_NO_SIGN_REQUEST'] = 'YES'
 
 import rasterio
+import rasterio.crs
 from rasterio.env import Env
 from rasterio.warp import reproject, Resampling
 from rasterio.features import geometry_mask
@@ -61,20 +58,21 @@ def warp_band_to_grid(item, band_name, dst_transform, dst_width, dst_height, dst
     """
     url = item.assets[band_name].href
     try:
-        with rasterio.open(url) as src:
-            band_dest = np.zeros((dst_height, dst_width), dtype='float32')
-            reproject(
-                source=rasterio.band(src, 1),
-                destination=band_dest,
-                src_transform=src.transform,
-                src_crs=src.crs,
-                dst_transform=dst_transform,
-                dst_crs=dst_crs,
-                resampling=Resampling.bilinear,
-                src_nodata=0,
-                dst_nodata=0
-            )
-            return band_name, band_dest
+        with Env(AWS_NO_SIGN_REQUEST='YES'):
+            with rasterio.open(url) as src:
+                band_dest = np.zeros((dst_height, dst_width), dtype='float32')
+                reproject(
+                    source=rasterio.band(src, 1),
+                    destination=band_dest,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=dst_transform,
+                    dst_crs=dst_crs,
+                    resampling=Resampling.bilinear,
+                    src_nodata=0,
+                    dst_nodata=0
+                )
+                return band_name, band_dest
     except Exception as e:
         # Retry with jp2 suffix if needed
         if not band_name.endswith('-jp2'):
@@ -142,7 +140,7 @@ def main():
     dst_width  = int(np.ceil((maxx - minx) / PIXEL_SIZE))
     dst_height = int(np.ceil((maxy - miny) / PIXEL_SIZE))
     dst_transform = rasterio.transform.from_origin(minx, maxy, PIXEL_SIZE, PIXEL_SIZE)
-    dst_crs = pyproj.CRS.from_epsg(TARGET_EPSG).to_wkt()
+    dst_crs = rasterio.crs.CRS.from_epsg(TARGET_EPSG).to_wkt()
     
     logger.info(f"Grid size : {dst_width} cols x {dst_height} rows")
     
@@ -210,18 +208,13 @@ def main():
             cloud = item.properties.get('eo:cloud_cover', 100)
             logger.info(f"  [{idx}/{len(date_items)}] Warping {tile_id} | Cloud: {cloud:.1f}%")
             
-            # Warp all 6 bands in parallel from AWS
+            # Warp all 6 bands sequentially from AWS
             tile_bands = {}
-            with ThreadPoolExecutor(max_workers=min(6, len(BAND_SELECTION))) as executor:
-                futures = {executor.submit(
-                    warp_band_to_grid, item, b, dst_transform, dst_width, dst_height, f"epsg:{TARGET_EPSG}"
-                ): b for b in BAND_SELECTION}
-                
-                for fut in as_completed(futures):
-                    b_name, band_data = fut.result()
-                    clean_name = b_name.replace('-jp2', '')
-                    if band_data is not None:
-                        tile_bands[clean_name] = band_data
+            for b in BAND_SELECTION:
+                b_name, band_data = warp_band_to_grid(item, b, dst_transform, dst_width, dst_height, f"epsg:{TARGET_EPSG}")
+                clean_name = b_name.replace('-jp2', '')
+                if band_data is not None:
+                    tile_bands[clean_name] = band_data
                         
             if not tile_bands:
                 continue
@@ -253,7 +246,7 @@ def main():
             'predictor': 2, 'bigtiff': 'IF_SAFER', 'nodata': 0,
         }
         
-        with Env(PROJ_LIB=PROJ_DIR, GDAL_DATA=PROJ_DIR):
+        with Env():
             with rasterio.open(output_filename, 'w', **out_profile) as dst:
                 for band_idx in range(len(BAND_SELECTION)):
                     dst.write(canvas[band_idx], band_idx + 1)
