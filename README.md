@@ -113,16 +113,16 @@ If you need raw **Single-Look Complex (SLC)** amplitude data (e.g. for ground de
 ---
 
 #### 2. Sentinel-2 (Optical - Unified S3-Direct Daily Mosaic Downloader)
-If you need **Sentinel-2 optical data** (e.g. for true-color RGB maps or vegetation health analysis), this script warps tiles **directly from AWS S3 in parallel to memory**, requiring zero local disk space for raw files:
-* **Run for the entire month (with Cloud Filter)**:
+If you need **Sentinel-2 optical data** (e.g. for true-color RGB maps or vegetation health analysis), this script warps tiles **directly from AWS S3 in memory**, requiring zero local disk space for raw files:
+* **Run for the entire month (with Cloud Filter & Custom 20m Resolution)**:
   ```powershell
-  python Download_Mumbai_Sentinel2.py --start 2026-06-01 --end 2026-06-30 --cloud-max 30 --out-dir "outputs/Sentinel-2-June2026"
+  python Download_Mumbai_Sentinel2.py --start 2026-06-01 --end 2026-06-30 --cloud-max 30 --resolution 20 --out-dir "outputs/Sentinel-2-June2026"
   ```
-* **Run for a single day**:
+* **Run for a single day (Default 10m Resolution)**:
   ```powershell
   python Download_Mumbai_Sentinel2.py --start 2026-06-02 --end 2026-06-02 --out-dir "outputs/Sentinel-2-June2026"
   ```
-  *Note: Mosaics are saved directly as unified, cropped, 6-band daily GeoTIFFs inside the specified `--out-dir`.*
+  *Note: Use the `--resolution` parameter to dynamically change target pixel spacing in meters (e.g., `10`, `20`, `30`, `60`). Mosaics are saved directly as unified, cropped, 6-band daily GeoTIFFs.*
 
 ---
 

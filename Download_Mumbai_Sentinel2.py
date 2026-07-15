@@ -94,14 +94,17 @@ def group_by_date(items):
     return groups
 
 def main():
+    global PIXEL_SIZE
     parser = argparse.ArgumentParser(description="Query, download, and stitch Sentinel-2 data for Mumbai AOI.")
     parser.add_argument("--shp", default="Mumbai_Flood_AOI/Mumbai_Flood_AOI.shp", help="Path to the AOI shapefile.")
     parser.add_argument("--start", default="2026-06-01", help="Start date (YYYY-MM-DD).")
     parser.add_argument("--end", default="2026-06-05", help="End date (YYYY-MM-DD).")
     parser.add_argument("--out-dir", default="outputs/Sentinel-2-Mosaics", help="Directory to save output mosaics.")
     parser.add_argument("--cloud-max", type=float, default=100.0, help="Exclude tiles with cloud cover greater than this percentage.")
+    parser.add_argument("--resolution", type=float, default=10.0, help="Target pixel resolution in meters (e.g. 10, 20, 30). Default is 10.0.")
     
     args = parser.parse_args()
+    PIXEL_SIZE = args.resolution
     
     # Setup directories
     out_dir = Path(args.out_dir)
@@ -115,14 +118,6 @@ def main():
         logger.error(f"Error parsing dates: {e}")
         sys.exit(1)
         
-    logger.info("=" * 80)
-    logger.info("STARTING SENTINEL-2 DAILY MOSAIC GENERATION")
-    logger.info(f"Target CRS   : EPSG:{TARGET_EPSG}")
-    logger.info(f"Bands        : {BAND_SELECTION}")
-    logger.info(f"Date Range   : {start_date} to {end_date}")
-    logger.info(f"Max Cloud %  : {args.cloud_max}%")
-    logger.info("=" * 80)
-    
     # Load shapefile
     if not os.path.exists(args.shp):
         logger.error(f"Shapefile not found: {args.shp}")
@@ -130,17 +125,36 @@ def main():
         
     logger.info(f"Loading AOI: {args.shp}")
     gdf_wgs84 = gpd.read_file(args.shp).to_crs('epsg:4326')
-    gdf_utm   = gdf_wgs84.to_crs(f'epsg:{TARGET_EPSG}')
-    
     aoi_wgs84 = gdf_wgs84.union_all()
-    aoi_utm   = gdf_utm.union_all()
+    shp_basename = Path(args.shp).stem
+    
+    # Calculate target UTM projection from centroid longitude/latitude
+    centroid = aoi_wgs84.centroid
+    lon, lat = centroid.x, centroid.y
+    utm_zone = int((lon + 180) / 6) + 1
+    if lat >= 0:
+        target_epsg = 32600 + utm_zone
+    else:
+        target_epsg = 32700 + utm_zone
+
+    logger.info("=" * 80)
+    logger.info("STARTING SENTINEL-2 DAILY MOSAIC GENERATION")
+    logger.info(f"Detected CRS  : EPSG:{target_epsg} (UTM Zone {utm_zone}{'N' if lat >= 0 else 'S'})")
+    logger.info(f"Resolution    : {PIXEL_SIZE:.1f} m")
+    logger.info(f"Bands        : {BAND_SELECTION}")
+    logger.info(f"Date Range   : {start_date} to {end_date}")
+    logger.info(f"Max Cloud %  : {args.cloud_max}%")
+    logger.info("=" * 80)
+    
+    gdf_utm = gdf_wgs84.to_crs(f'epsg:{target_epsg}')
+    aoi_utm = gdf_utm.union_all()
     
     # Define Destination Grid
     minx, miny, maxx, maxy = aoi_utm.bounds
     dst_width  = int(np.ceil((maxx - minx) / PIXEL_SIZE))
     dst_height = int(np.ceil((maxy - miny) / PIXEL_SIZE))
     dst_transform = rasterio.transform.from_origin(minx, maxy, PIXEL_SIZE, PIXEL_SIZE)
-    dst_crs = rasterio.crs.CRS.from_epsg(TARGET_EPSG).to_wkt()
+    dst_crs = rasterio.crs.CRS.from_epsg(target_epsg).to_wkt()
     
     logger.info(f"Grid size : {dst_width} cols x {dst_height} rows")
     
@@ -211,7 +225,7 @@ def main():
             # Warp all 6 bands sequentially from AWS
             tile_bands = {}
             for b in BAND_SELECTION:
-                b_name, band_data = warp_band_to_grid(item, b, dst_transform, dst_width, dst_height, f"epsg:{TARGET_EPSG}")
+                b_name, band_data = warp_band_to_grid(item, b, dst_transform, dst_width, dst_height, f"epsg:{target_epsg}")
                 clean_name = b_name.replace('-jp2', '')
                 if band_data is not None:
                     tile_bands[clean_name] = band_data
@@ -233,7 +247,7 @@ def main():
             canvas[band_idx][~aoi_mask] = 0
             
         # Export final mosaic GeoTIFF
-        output_filename = out_dir / f"Mumbai_Sentinel2_{date_str}_6BAND_EPSG{TARGET_EPSG}.tif"
+        output_filename = out_dir / f"{shp_basename}_Sentinel2_{date_str}_6BAND_EPSG{target_epsg}.tif"
         logger.info(f"  Saving stitched & cropped mosaic to: {output_filename.name}")
         
         out_profile = {
