@@ -102,6 +102,7 @@ def main():
     parser.add_argument("--out-dir", default="outputs/Sentinel-2-Mosaics", help="Directory to save output mosaics.")
     parser.add_argument("--cloud-max", type=float, default=100.0, help="Exclude tiles with cloud cover greater than this percentage.")
     parser.add_argument("--resolution", type=float, default=10.0, help="Target pixel resolution in meters (e.g. 10, 20, 30). Default is 10.0.")
+    parser.add_argument("--no-stitch", action="store_true", help="Save overlapping tiles as separate files instead of stitching them into one giant mosaic (recommended for large AOIs like Ladakh at 10m).")
     
     args = parser.parse_args()
     PIXEL_SIZE = args.resolution
@@ -207,6 +208,94 @@ def main():
             logger.info(f"\nSkipping date {date_str} - all tiles exceed cloud threshold of {args.cloud_max}%")
             continue
             
+        if args.no_stitch:
+            logger.info("\n" + "-"*80)
+            logger.info(f"DATE: {date_str} | Processing {len(date_items)} tiles separately (no-stitch)...")
+            logger.info("-"*80)
+            
+            for idx, item in enumerate(date_items, 1):
+                tile_id = item.id.split('_')[1] if '_' in item.id else item.id
+                cloud = item.properties.get('eo:cloud_cover', 100)
+                logger.info(f"  [{idx}/{len(date_items)}] Warping & clipping {tile_id} | Cloud: {cloud:.1f}%")
+                
+                # Get intersection of tile geometry with the WGS84 AOI
+                tile_geom_wgs84 = shape(item.geometry)
+                inter_geom_wgs84 = tile_geom_wgs84.intersection(aoi_wgs84)
+                if inter_geom_wgs84.is_empty:
+                    logger.warning(f"    Tile {tile_id} does not intersect the AOI geometry. Skipping.")
+                    continue
+                    
+                # Project the intersection boundary to the local UTM zone
+                inter_gdf = gpd.GeoDataFrame(geometry=[inter_geom_wgs84], crs='epsg:4326').to_crs(f'epsg:{target_epsg}')
+                inter_utm = inter_gdf.union_all()
+                
+                t_minx, t_miny, t_maxx, t_maxy = inter_utm.bounds
+                t_width = int(np.ceil((t_maxx - t_minx) / PIXEL_SIZE))
+                t_height = int(np.ceil((t_maxy - t_miny) / PIXEL_SIZE))
+                
+                if t_width <= 0 or t_height <= 0:
+                    continue
+                    
+                t_transform = rasterio.transform.from_origin(t_minx, t_maxy, PIXEL_SIZE, PIXEL_SIZE)
+                
+                # Allocate a small canvas for this tile's portion of the AOI
+                tile_canvas = np.zeros((len(BAND_SELECTION), t_height, t_width), dtype='float32')
+                
+                # Warp bands sequentially
+                tile_bands = {}
+                for b in BAND_SELECTION:
+                    b_name, band_data = warp_band_to_grid(item, b, t_transform, t_width, t_height, f"epsg:{target_epsg}")
+                    clean_name = b_name.replace('-jp2', '')
+                    if band_data is not None:
+                        tile_bands[clean_name] = band_data
+                        
+                if not tile_bands:
+                    logger.warning(f"    Failed to retrieve any bands for tile {tile_id}. Skipping.")
+                    continue
+                    
+                # Paint
+                ref_band_data = tile_bands.get('blue', next(iter(tile_bands.values())))
+                valid_tile_pixels = (ref_band_data > 0)
+                for band_idx, b_name in enumerate(BAND_SELECTION):
+                    if b_name in tile_bands:
+                        tile_canvas[band_idx][valid_tile_pixels] = tile_bands[b_name][valid_tile_pixels]
+                        
+                # Generate tile-specific geometry mask
+                t_mask = geometry_mask(
+                    [inter_utm],
+                    out_shape=(t_height, t_width),
+                    transform=t_transform,
+                    invert=True
+                )
+                for band_idx in range(len(BAND_SELECTION)):
+                    tile_canvas[band_idx][~t_mask] = 0
+                    
+                # Export individual tile GeoTIFF
+                output_filename = out_dir / f"{shp_basename}_Sentinel2_{date_str}_{tile_id}_6BAND_EPSG{target_epsg}.tif"
+                logger.info(f"    Saving tile to: {output_filename.name}")
+                
+                out_profile = {
+                    'driver': 'GTiff',
+                    'height': t_height, 'width': t_width,
+                    'count': len(BAND_SELECTION), 'dtype': 'float32',
+                    'crs': dst_crs, 'transform': t_transform,
+                    'compress': 'lzw', 'tiled': True,
+                    'blockxsize': 256, 'blockysize': 256,
+                    'predictor': 2, 'bigtiff': 'IF_SAFER', 'nodata': 0,
+                }
+                
+                with Env():
+                    with rasterio.open(output_filename, 'w', **out_profile) as dst:
+                        for band_idx in range(len(BAND_SELECTION)):
+                            dst.write(tile_canvas[band_idx], band_idx + 1)
+                        for band_idx, name in enumerate(BAND_SELECTION, 1):
+                            dst.set_band_description(band_idx, name)
+                            
+                size_mb = output_filename.stat().st_size / (1024 * 1024)
+                logger.info(f"    Successfully saved tile ({size_mb:.1f} MB)")
+            
+            continue
+
         logger.info("\n" + "-"*80)
         logger.info(f"DATE: {date_str} | Stitching {len(date_items)} tiles...")
         logger.info("-"*80)
